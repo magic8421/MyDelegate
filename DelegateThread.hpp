@@ -28,6 +28,12 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
+//
+// This piece of code is base on David Lafreniere's excellent article:
+// https://www.codeproject.com/Articles/1160934/Asynchronous-Multicast-Delegates-in-Cplusplus
+// exetend with c++11 variadic templete and move operation.
+//
+
 #include "stdafx.h"
 #include "Delegate.hpp"
 
