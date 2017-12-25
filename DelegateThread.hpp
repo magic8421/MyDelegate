@@ -39,44 +39,18 @@
 
 namespace cs{
 
-template<int ...> struct seq {};
+template<int ...> struct sequence_t {};
 
-template<int N, int ...S> struct gens : gens<N - 1, N - 1, S...> {};
+template<int N, int ...S> struct generate_sequence_t : generate_sequence_t<N - 1, N - 1, S...> {};
 
-template<int ...S> struct gens<0, S...>{ typedef seq<S...> type; };
+template<int ...S> struct generate_sequence_t<0, S...>{ typedef sequence_t<S...> type; };
 
-
-class IDelegateInvoker;
 
 class DelegateMsgBase
 {
 public:
-    /// Constructor
-    /// @param[in] invoker - the invoker instance the delegate is registered with.
-    /// @param[in] delegate - the delegate instance. 
-    DelegateMsgBase(IDelegateInvoker* invoker) :
-        m_invoker(invoker)
-    {
-        assert(m_invoker != nullptr);
-    }
-
-    /// Get the delegate invoker instance the delegate is registered with.
-    /// @return The invoker instance. 
-    IDelegateInvoker* GetDelegateInvoker() const { return m_invoker; }
-
-private:
-    /// The IDelegateInvoker instance 
-    IDelegateInvoker* m_invoker;
+    virtual void Invoke() = 0;
 };
-
-class IDelegateInvoker
-{
-public:
-    /// Called to invoke the callback by the destination thread of control. 
-    /// @param[in] msg - the incoming delegate message. 
-    virtual void DelegateInvoke(DelegateMsgBase** msg) = 0;
-};
-
 
 /// @brief Each platform specific implementation must inherit from DelegateThread
 /// and provide an implementation for DispatchDelegate().
@@ -137,7 +111,7 @@ private:
             else if (msg.message == DELEGATE_MSG)
             {
                 DelegateMsgBase *delegateMsg = reinterpret_cast<DelegateMsgBase *>(msg.wParam);
-                delegateMsg->GetDelegateInvoker()->DelegateInvoke(&delegateMsg);
+                delegateMsg->Invoke();
             }
         }
         return 0;
@@ -145,70 +119,123 @@ private:
     DWORD m_id = 0;
 };
 
-template <typename... Params>
+template <class T, typename... Params>
 class DelegateMsg : public DelegateMsgBase
 {
 public:
-    DelegateMsg(IDelegateInvoker *invoker, Params&&...params) :
-        DelegateMsgBase(invoker),
-        m_tuple(std::forward<Params>(params)...) {}
+    DelegateMsg(Params&&...params) :
+        tuple(std::forward<Params>(params)...) {}
 
-    std::tuple<Params...> m_tuple;
+    typedef void(T::*MenberFunc)(Params...);
+    T *obj;
+    MenberFunc func;
+    std::tuple<Params...> tuple;
+
+    template<int ...S>
+    void callFunc(std::tuple<Params...> &tup, sequence_t<S...>)
+    {
+        return (*obj.*func)(std::move(std::get<S>(tup)) ...);
+    }
+
+    virtual void Invoke() override
+    {
+        callFunc(tuple, typename generate_sequence_t<sizeof...(Params)>::type());
+        delete this;
+    }
 };
 
 template <class T, typename... Params>
-class DelegateMemberAsync : public Delegate<Params...>, public IDelegateInvoker
+struct DelegateAsyncData
+{
+    typedef void(T::*MenberFunc)(Params...);
+    DelegateAsyncData() : obj(nullptr), func(0), thread(nullptr) {}
+    DelegateAsyncData(T* obj_, MenberFunc func_, DelegateThread *thread_):
+        obj(obj_), func(func_), thread(thread_) {}
+
+    bool operator==(const DelegateAsyncData& rhs)
+    {
+        return rhs.obj == obj && rhs.func == func && rhs.thread == thread;
+    }
+
+    T *obj;
+    MenberFunc func;
+    DelegateThread *thread;
+};
+
+template <class T, typename... Params>
+class DelegateMemberAsync : public Delegate<Params...>
 {
 public:
     typedef void(T::*MenberFunc)(Params...);
 
-    DelegateMemberAsync(T *obj, MenberFunc func, DelegateThread *thread) :
-        m_obj(obj), m_func(func), m_thread(thread)
-    {}
+    DelegateMemberAsync() : d(nullptr) {}
 
-    ~DelegateMemberAsync() {}
+    DelegateMemberAsync(const DelegateMemberAsync& rhs)
+    {
+        if (rhs.d) 
+        {
+            d = new DelegateAsyncData<T, Params...>;
+            *d = *rhs.d;
+        }
+        else
+        {
+            d = nullptr;
+        }
+    }
+
+    DelegateMemberAsync(T *obj, MenberFunc func, DelegateThread *thread)
+    {
+        d = new DelegateAsyncData<T, Params...>(obj, func, thread);
+    }
+
+    DelegateMemberAsync(DelegateMemberAsync && rhs)
+    {
+        d = rhs.d;
+        rhs.d = nullptr;
+    }
+
+    virtual ~DelegateMemberAsync() override
+    {
+        delete d;
+    }
 
     void operator()(Params&&... params) override
     {
-        auto msg = new DelegateMsg<Params...>(Clone(), std::forward<Params>(params)...);
-        m_thread->DispatchDelegate(msg);
+        if (!d) return;
+        auto msg = new DelegateMsg<T, Params...>(std::forward<Params>(params)...);
+        msg->obj = d->obj;
+        msg->func = d->func;
+        d->thread->DispatchDelegate(msg);
+    }
+
+    void operator=(const DelegateMemberAsync& rhs) = delete;
+
+    void operator=(DelegateMemberAsync && rhs)
+    {
+        delete d;
+        d = rhs.d;
+        rhs.d = nullptr;
     }
 
     bool operator==(const DelegateBase& rhs) const override
     {
-        auto d = dynamic_cast<const DelegateMemberAsync<T, Params...>*>(&rhs);
-        return d && m_obj == d->m_obj && m_func == d->m_func;
+        auto r = dynamic_cast<const DelegateMemberAsync<T, Params...>*>(&rhs);
+        return r && d && *d == *(r->d);
     }
 
     DelegateMemberAsync *Clone() const override
     {
-        return new DelegateMemberAsync(m_obj, m_func, m_thread);;
-    }
-
-    template<int ...S>
-    void callFunc(std::tuple<Params...> &tup, seq<S...>)
-    {
-        return (*m_obj.*m_func)(std::move(std::get<S>(tup)) ...);
-    }
-
-    virtual void DelegateInvoke(DelegateMsgBase** msg) override
-    {
-        auto delegateMsg = static_cast<DelegateMsg<Params...>*>(*msg);
-        callFunc(delegateMsg->m_tuple, typename gens<sizeof...(Params)>::type());
-        delete *msg;
-        *msg = nullptr;
-        delete this;
+        return new DelegateMemberAsync(*this);;
     }
 
 private:
-    T *m_obj;
-    MenberFunc m_func;
-    DelegateThread *m_thread;
+    DelegateAsyncData<T, Params...> *d;
 };
 
 template <class T, typename... Params>
 DelegateMemberAsync<T, Params...> MakeDelegate(T *obj, void (T::*func)(Params...), DelegateThread *thread)
 {
+    assert(thread != 0);
     return DelegateMemberAsync<T, Params...>(obj, func, thread);
 }
 

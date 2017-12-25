@@ -75,6 +75,7 @@ public:
         {
             if (*m_list[i] == d)
             {
+                delete m_list[i];
                 for (size_t j = i; j + 1 < m_list.size(); j++)
                 {
                     m_list[j] = m_list[j + 1];
@@ -101,36 +102,82 @@ private:
 };
 
 template <class T, typename... Params>
+struct DelegateData
+{
+    typedef void(T::*MenberFunc)(Params...);
+    DelegateData() : obj(nullptr), func(0) {}
+    DelegateData(T* obj_, MenberFunc func_) :
+        obj(obj_), func(func_) {}
+
+    bool operator==(const DelegateData& rhs)
+    {
+        return rhs.obj == obj && rhs.func == func;
+    }
+
+    T *obj;
+    MenberFunc func;
+};
+
+template <class T, typename... Params>
 class DelegateMember : public Delegate<Params...>
 {
 public:
     typedef void(T::*MenberFunc)(Params...);
 
-    DelegateMember(T *obj, MenberFunc func) :
-        m_obj(obj), m_func(func)
-    {}
+    DelegateMember() : d(nullptr) {}
 
-    ~DelegateMember() {}
+    DelegateMember(T *obj, MenberFunc func)
+    {
+        d = new DelegateData<T, Params...>(obj, func);
+    }
+
+    DelegateMember(const DelegateMember &rhs)
+    {
+        if (rhs.d)
+            d = new DelegateData<T, Params...>(rhs.d->obj, rhs.d->func);
+        else
+            d = nullptr;
+    }
+
+    DelegateMember(DelegateMember && rhs)
+    {
+        d = rhs.d;
+        rhs.d = nullptr;
+    }
+
+    void operator=(const DelegateMember &rhs) = delete;
+
+    void operator=(DelegateMember && rhs)
+    {
+        delete d;
+        d = rhs.d;
+        rhs.d = nullptr;
+    }
+
+    virtual ~DelegateMember() override 
+    {
+        delete d;
+    }
 
     void operator()(Params&&... params) override
     {
-        (*m_obj.*m_func)(std::forward<Params>(params)...);
+        if (!d) return;
+        (*(d->obj).*(d->func))(std::forward<Params>(params)...);
     }
 
     bool operator==(const DelegateBase& rhs) const override
     {
-        auto d = dynamic_cast<const DelegateMember<T, Params...>*>(&rhs);
-        return d && m_obj == d->m_obj && m_func == d->m_func;
+        auto r = dynamic_cast<const DelegateMember<T, Params...>*>(&rhs);
+        return r && d && *d == *(r->d);
     }
 
     DelegateMember *Clone() const override
     {
-        return new DelegateMember(m_obj, m_func);;
+        return new DelegateMember(*this);;
     }
 
 private:
-    T *m_obj;
-    MenberFunc m_func;
+    DelegateData<T, Params...> *d;
 };
 
 template <class T, typename... Params>
